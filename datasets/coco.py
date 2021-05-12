@@ -11,6 +11,8 @@ import torch.utils.data
 import torchvision
 from pycocotools import mask as coco_mask
 
+import torchvision.transforms as TT
+
 import datasets.transforms as T
 
 
@@ -155,7 +157,7 @@ def make_voc_transforms(image_set, args):
         if args.backbone == 'vit':
             return T.Compose([
                 T.RandomHorizontalFlip(),
-                T.Resize((384, 384)),
+                TT.Resize((384, 384)),
                 normalize,
             ])
         else:
@@ -176,7 +178,7 @@ def make_voc_transforms(image_set, args):
         if args.backbone == 'vit':
             return T.Compose([
                 T.RandomHorizontalFlip(),
-                T.Resize((384, 384)),
+                TT.Resize((384, 384)),
                 normalize,
             ])
     else:
