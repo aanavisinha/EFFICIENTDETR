@@ -15,6 +15,7 @@ from util.misc import NestedTensor, is_main_process
 
 from .position_encoding import build_position_encoding
 
+import timm
 
 class FrozenBatchNorm2d(torch.nn.Module):
     """
@@ -91,6 +92,35 @@ class Backbone(BackboneBase):
             pretrained=is_main_process(), norm_layer=FrozenBatchNorm2d)
         num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
+        
+# VIT BACKBONE
+
+class ViTBackbone():
+    def __init__(self): 
+        self.body = timm.create_model('vit_base_patch16_384', pretrained=True)
+        self.body.num_classes = 0
+        self.num_channels = 2048
+  
+    def forward(self, tensor_list: NestedTensor):
+        x = tensor_list.tensors
+        x = self.body.patch_embed(x)
+        x = self.body.pos_drop(x)
+        for module in self.body.blocks:
+            x = module(x)
+        x = self.body.norm(x)
+        x = torch.reshape(x, (-1, 2048, 18, 12))
+        x = self.body.pre_logits(x)
+
+        m = tensor_list.mask
+        mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+
+        out: Dict[str, NestedTensor] = {}
+        out['0'] = NestedTensor(x, mask)
+
+        return out
+
+    def __call__(self, tensor_list: NestedTensor):
+        return self.forward(tensor_list)
 
 
 class Joiner(nn.Sequential):
@@ -107,13 +137,40 @@ class Joiner(nn.Sequential):
             pos.append(self[1](x).to(x.tensors.dtype))
 
         return out, pos
+    
+# VIT JOINER
 
+class ViTJoiner(ViTBackbone):
+    def __init  __(self, backbone, position_embedding):
+        self.backbone = backbone
+        self.position_embedding = position_embedding
+  
+    def forward(self, tensor_list: NestedTensor):
+        xs = self.backbone(tensor_list)
+        out: List[NestedTensor] = []
+        pos = []
+        for name, x in xs.items():
+            out.append(x)
+            # position encoding
+            pos.append(self.position_embedding(x).to(x.tensors.dtype))
 
+        return out, pos
+  
+    def __call__(self, tensor_list: NestedTensor):
+        return self.forward(tensor_list)
+
+    
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
-    train_backbone = args.lr_backbone > 0
-    return_interm_layers = args.masks
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
-    model = Joiner(backbone, position_embedding)
-    model.num_channels = backbone.num_channels
-    return model
+    if args.backbone == 'vit':
+        backbone = ViTBackbone()
+        model = ViTJoiner(backbone, position_embedding)
+        model.num_channels = backbone.num_channels
+        return model
+    else:
+        train_backbone = args.lr_backbone > 0
+        return_interm_layers = args.masks
+        backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+        model = Joiner(backbone, position_embedding)
+        model.num_channels = backbone.num_channels
+        return model
