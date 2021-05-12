@@ -148,17 +148,13 @@ def make_coco_transforms(image_set):
 
 def make_voc_transforms(image_set, args):
 
-    normalize = T.Compose([
-        T.ToTensor(),
-        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-
     if image_set == 'train':
         if args.backbone == 'vit':
-            return T.Compose([
-                T.RandomHorizontalFlip(),
+            return TT.Compose([
+                TT.RandomHorizontalFlip(),
                 TT.Resize((384, 384)),
-                normalize,
+                TT.ToTensor(),
+                TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ])
         else:
             return T.Compose([
@@ -176,10 +172,11 @@ def make_voc_transforms(image_set, args):
 
     if image_set == 'val':
         if args.backbone == 'vit':
-            return T.Compose([
-                T.RandomHorizontalFlip(),
+            return TT.Compose([
+                TT.RandomHorizontalFlip(),
                 TT.Resize((384, 384)),
-                normalize,
+                TT.ToTensor(),
+                TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ])
     else:
         return T.Compose([
