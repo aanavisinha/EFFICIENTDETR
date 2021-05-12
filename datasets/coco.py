@@ -173,12 +173,12 @@ def make_voc_transforms(image_set):
             ])
 
     if image_set == 'val':
-    if args.backbone == 'vit':
-        return T.Compose([
-            T.RandomHorizontalFlip(),
-            T.Resize((384, 384)),
-            normalize,
-        ])
+        if args.backbone == 'vit':
+            return T.Compose([
+                T.RandomHorizontalFlip(),
+                T.Resize((384, 384)),
+                normalize,
+            ])
     else:
         return T.Compose([
             T.RandomResize([600], max_size=1000),
