@@ -98,6 +98,7 @@ class Backbone(BackboneBase):
 class ViTBackbone():
     def __init__(self): 
         self.body = timm.create_model('vit_base_patch16_384', pretrained=True)
+        self.body = self.body.cuda()
         self.body.num_classes = 0
         self.num_channels = 2048
   
