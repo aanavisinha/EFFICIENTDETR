@@ -105,7 +105,7 @@ def get_args_parser():
 
 
 def main(args):
-    wandb.init(project='detrreg', config=args) # wandb
+    wandb.init(project='detrvit', config=args) # wandb
     config = wandb.config # wandb
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
