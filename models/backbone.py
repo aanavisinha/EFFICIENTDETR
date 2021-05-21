@@ -122,7 +122,29 @@ class ViTBackbone():
 
     def __call__(self, tensor_list: NestedTensor):
         return self.forward(tensor_list)
+    
+class ViTBackboneInt(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.body = IntermediateLayerGetter(timm.create_model('vit_base_patch16_384', pretrained=True), return_layers={'blocks': '0'})
 
+        for name, parameter in self.body.named_parameters():
+            parameter.requires_grad_(True)
+
+        self.num_classes = 21
+        self.num_channels = 2048
+
+    def forward(self, tensor_list: NestedTensor):
+        print(tensor_list.tensors.shape, len(tensor_list.tensors))
+        xs = self.body(tensor_list.tensors)
+        xs['0'] = torch.reshape(xs['0'], (-1, 2048, 18, 12))
+        out: Dict[str, NestedTensor] = {}
+        for name, x in xs.items():
+            m = tensor_list.mask
+            assert m is not None
+            mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+            out[name] = NestedTensor(x, mask)
+        return out
 
 class Joiner(nn.Sequential):
     def __init__(self, backbone, position_embedding):
@@ -164,8 +186,8 @@ class ViTJoiner(ViTBackbone):
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
     if args.backbone == 'vit':
-        backbone = ViTBackbone()
-        model = ViTJoiner(backbone, position_embedding)
+        backbone = ViTBackboneInt()
+        model = Joiner(backbone, position_embedding)
         model.num_channels = backbone.num_channels
         return model
     else:
