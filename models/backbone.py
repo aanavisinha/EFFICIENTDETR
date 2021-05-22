@@ -135,6 +135,8 @@ class ViTBackboneInt(nn.Module):
         self.num_channels = 2048
 
     def forward(self, tensor_list: NestedTensor):
+        for tensor in tensor_list.tensors:
+            xs = self.body(tensor)
         print(tensor_list.tensors.shape, len(tensor_list.tensors))
         xs = self.body(tensor_list.tensors)
         xs['0'] = torch.reshape(xs['0'], (-1, 2048, 18, 12))
