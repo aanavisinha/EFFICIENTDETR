@@ -125,11 +125,15 @@ class ViTBackbone():
     
 class ViTBackboneInt(nn.Module):
     def __init__(self):
-        super().__init__()
+        super().__init__(train_backbone: bool)
         self.body = IntermediateLayerGetter(timm.create_model('vit_base_patch16_384', pretrained=True), return_layers={'blocks': '0'})
 
-        for name, parameter in self.body.named_parameters():
-            parameter.requires_grad_(True)
+        if train_backbone:
+            for name, parameter in self.body.named_parameters():
+                parameter.requires_grad_(True)
+        else:
+            for name, parameter in self.body.named_parameters():
+                parameter.requires_grad_(False)
 
         self.num_classes = 21
         self.num_channels = 2048
