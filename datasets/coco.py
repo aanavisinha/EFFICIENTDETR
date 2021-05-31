@@ -4,14 +4,227 @@ COCO dataset which returns image_id for evaluation.
 
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
+from collections import OrderedDict
+
+import torch
+import torch.nn.functional as F
+import torchvision
+from torch import nn
+from torchvision.models._utils import IntermediateLayerGetter
+from typing import Dict, List
+
+from util.misc import NestedTensor, is_main_process
+
+from .position_encoding import build_position_encoding
+
+import timm
+
+class FrozenBatchNorm2d(torch.nn.Module):
+    """
+    BatchNorm2d where the batch statistics and the affine parameters are fixed.
+
+    Copy-paste from torchvision.misc.ops with added eps before rqsrt,
+    without which any other models than torchvision.models.resnet[18,34,50,101]
+    produce nans.
+    """
+
+    def __init__(self, n):
+        super(FrozenBatchNorm2d, self).__init__()
+        self.register_buffer("weight", torch.ones(n))
+        self.register_buffer("bias", torch.zeros(n))
+        self.register_buffer("running_mean", torch.zeros(n))
+        self.register_buffer("running_var", torch.ones(n))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        num_batches_tracked_key = prefix + 'num_batches_tracked'
+        if num_batches_tracked_key in state_dict:
+            del state_dict[num_batches_tracked_key]
+
+        super(FrozenBatchNorm2d, self)._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs)
+
+    def forward(self, x):
+        # move reshapes to the beginning
+        # to make it fuser-friendly
+        w = self.weight.reshape(1, -1, 1, 1)
+        b = self.bias.reshape(1, -1, 1, 1)
+        rv = self.running_var.reshape(1, -1, 1, 1)
+        rm = self.running_mean.reshape(1, -1, 1, 1)
+        eps = 1e-5
+        scale = w * (rv + eps).rsqrt()
+        bias = b - rm * scale
+        return x * scale + bias
+
+
+class BackboneBase(nn.Module):
+
+    def __init__(self, backbone: nn.Module, train_backbone: bool, num_channels: int, return_interm_layers: bool):
+        super().__init__()
+        for name, parameter in backbone.named_parameters():
+            if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+                parameter.requires_grad_(False)
+        if return_interm_layers:
+            return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
+        else:
+            return_layers = {'layer4': "0"}
+        self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
+        self.num_channels = num_channels
+
+    def forward(self, tensor_list: NestedTensor):
+        xs = self.body(tensor_list.tensors)
+        out: Dict[str, NestedTensor] = {}
+        for name, x in xs.items():
+            m = tensor_list.mask
+            assert m is not None
+            mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+            out[name] = NestedTensor(x, mask)
+        return out
+
+
+class Backbone(BackboneBase):
+    """ResNet backbone with frozen BatchNorm."""
+    def __init__(self, name: str,
+                 train_backbone: bool,
+                 return_interm_layers: bool,
+                 dilation: bool):
+        backbone = getattr(torchvision.models, name)(
+            replace_stride_with_dilation=[False, False, dilation],
+            pretrained=is_main_process(), norm_layer=FrozenBatchNorm2d)
+        num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
+        super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
+        
+# VIT BACKBONE
+
+class ViTBackbone():
+    def __init__(self): 
+        self.body = timm.create_model('vit_base_patch16_384', pretrained=True)
+        self.body = self.body.cuda()
+        self.body.num_classes = 21
+        self.num_channels = 2048
+  
+    def forward(self, tensor_list: NestedTensor):
+        x = tensor_list.tensors
+        x = self.body.patch_embed(x)
+        x = self.body.pos_drop(x)
+        for module in self.body.blocks:
+            x = module(x)
+        x = self.body.norm(x)
+        x = torch.reshape(x, (-1, 2048, 18, 12))
+        x = self.body.pre_logits(x)
+
+        m = tensor_list.mask
+        mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+
+        out: Dict[str, NestedTensor] = {}
+        out['0'] = NestedTensor(x, mask)
+
+        return out
+
+    def __call__(self, tensor_list: NestedTensor):
+        return self.forward(tensor_list)
+
+# VIT INT GETTER
+class ViTBackboneInt(nn.Module):
+    def __init__(self, train_backbone: bool, channel_768: bool):
+        super().__init__()
+        self.body = IntermediateLayerGetter(timm.create_model('vit_base_patch16_384', pretrained=True), return_layers={'blocks': '0'})
+
+        if train_backbone:
+            for name, parameter in self.body.named_parameters():
+                parameter.requires_grad_(True)
+        else:
+            for name, parameter in self.body.named_parameters():
+                parameter.requires_grad_(False)
+
+        if channel_768:
+            self.num_channels = 768
+        else:
+            self.num_channels = 2048
+
+
+    def forward(self, tensor_list: NestedTensor):
+        xs = self.body(tensor_list.tensors)
+        if self.num_channels == 768:
+            xs['0'] = torch.reshape(xs['0'], (-1, 768, 24, 24))
+        else:
+            xs['0'] = torch.reshape(xs['0'], (-1, 2048, 18, 12)) 
+        out: Dict[str, NestedTensor] = {}
+        for name, x in xs.items():
+            m = tensor_list.mask
+            assert m is not None
+            mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+            out[name] = NestedTensor(x, mask)
+        return out
+
+
+class Joiner(nn.Sequential):
+    def __init__(self, backbone, position_embedding):
+        super().__init__(backbone, position_embedding)
+
+    def forward(self, tensor_list: NestedTensor):
+        xs = self[0](tensor_list)
+        out: List[NestedTensor] = []
+        pos = []
+        for name, x in xs.items():
+            out.append(x)
+            # position encoding
+            pos.append(self[1](x).to(x.tensors.dtype))
+
+        return out, pos
+    
+# VIT JOINER
+
+class ViTJoiner(ViTBackbone):
+    def __init__(self, backbone, position_embedding):
+        self.backbone = backbone
+        self.position_embedding = position_embedding
+  
+    def forward(self, tensor_list: NestedTensor):
+        xs = self.backbone(tensor_list)
+        out: List[NestedTensor] = []
+        pos = []
+        for name, x in xs.items():
+            out.append(x)
+            # position encoding
+            pos.append(self.position_embedding(x).to(x.tensors.dtype))
+
+        return out, pos
+  
+    def __call__(self, tensor_list: NestedTensor):
+        return self.forward(tensor_list)
+
+    
+def build_backbone(args):
+    position_embedding = build_position_encoding(args)
+    if args.backbone == 'vit':
+        train_backbone = args.lr_backbone > 0
+        channel_768 = args.epochs == 151
+        backbone = ViTBackboneInt(train_backbone = train_backbone, channel_768 = channel_768)
+        model = Joiner(backbone, position_embedding)
+        model.num_channels = backbone.num_channels
+        return model
+    else:
+        train_backbone = args.lr_backbone > 0
+        return_interm_layers = args.masks
+        backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+        model = Joiner(backbone, position_embedding)
+        model.num_channels = backbone.num_channels
+        return model
+(base) asinha@login4:~$ cat detrvit/datasets/coco.py
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+"""
+COCO dataset which returns image_id for evaluation.
+
+Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
+"""
 from pathlib import Path
 
 import torch
 import torch.utils.data
 import torchvision
 from pycocotools import mask as coco_mask
-
-import torchvision.transforms as TT
 
 import datasets.transforms as T
 
@@ -146,53 +359,42 @@ def make_coco_transforms(image_set):
     raise ValueError(f'unknown {image_set}')
     
 
-def make_voc_transforms(image_set, args):
+def make_voc_transforms(image_set):
+
+    normalize = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
 
     if image_set == 'train':
-        if args.backbone == 'vit':
-            return TT.Compose([
-                TT.RandomHorizontalFlip(),
-                TT.Resize((384, 384)),
-                TT.ToTensor(),
-                TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-            ])
-        else:
-            return T.Compose([
-                T.RandomHorizontalFlip(),
-                T.RandomSelect(
-                    T.RandomResize([400, 500, 600], max_size=1000),
-                    T.Compose([
-                        T.RandomResize([400, 500, 600]),
-                        T.RandomCrop((384, 384)),
-                        T.RandomResize([400, 500, 600], max_size=1000),
-                    ])
-                ),
-                normalize,
-            ])
-
-    if image_set == 'val':
-        if args.backbone == 'vit':
-            return TT.Compose([
-                TT.RandomHorizontalFlip(),
-                TT.Resize((384, 384)),
-                TT.ToTensor(),
-                TT.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-            ])
-    else:
         return T.Compose([
-            T.RandomResize([600], max_size=1000),
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                T.RandomResize((384, 384), max_size=384),
+                T.Compose([
+                    T.RandomResize((384, 384)),
+                    T.RandomResize((384, 384), max_size=384),
+                ])
+            ),
             normalize,
         ])
+
+    if image_set == 'val':
+        return T.Compose([
+            T.RandomResize((384, 384), max_size=384),
+            normalize,
+        ])
+
 
 def build(image_set, args):
     root = Path(args.coco_path)
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
     PATHS = {
-        "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
-        "val": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
+        "train": (root / "images", root / "annotations" / f'{mode}_train2017.json'),
+        "val": (root / "images", root / "annotations" / f'{mode}_val2017.json'),
     }
 
     img_folder, ann_file = PATHS[image_set]
-    dataset = CocoDetection(img_folder, ann_file, transforms=make_voc_transforms(image_set, args), return_masks=args.masks)
+    dataset = CocoDetection(img_folder, ann_file, transforms=make_voc_transforms(image_set), return_masks=args.masks)
     return dataset
