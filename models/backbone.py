@@ -99,7 +99,7 @@ class ViTBackbone():
     def __init__(self): 
         self.body = timm.create_model('vit_base_patch16_384', pretrained=True)
         self.body = self.body.cuda()
-        self.body.num_classes = 0
+        self.body.num_classes = 21
         self.num_channels = 2048
   
     def forward(self, tensor_list: NestedTensor):
@@ -122,10 +122,11 @@ class ViTBackbone():
 
     def __call__(self, tensor_list: NestedTensor):
         return self.forward(tensor_list)
-    
+
+# VIT INT GETTER
 class ViTBackboneInt(nn.Module):
-    def __init__(self):
-        super().__init__(train_backbone: bool)
+    def __init__(self, train_backbone: bool, channel_768: bool):
+        super().__init__()
         self.body = IntermediateLayerGetter(timm.create_model('vit_base_patch16_384', pretrained=True), return_layers={'blocks': '0'})
 
         if train_backbone:
@@ -135,15 +136,18 @@ class ViTBackboneInt(nn.Module):
             for name, parameter in self.body.named_parameters():
                 parameter.requires_grad_(False)
 
-        self.num_classes = 21
-        self.num_channels = 2048
+        if channel_768:
+            self.num_channels = 768
+        else:
+            self.num_channels = 2048
+
 
     def forward(self, tensor_list: NestedTensor):
-        for tensor in tensor_list.tensors:
-            xs = self.body(tensor)
-        print(tensor_list.tensors.shape, len(tensor_list.tensors))
         xs = self.body(tensor_list.tensors)
-        xs['0'] = torch.reshape(xs['0'], (-1, 2048, 18, 12))
+        if self.num_channels == 768:
+            xs['0'] = torch.reshape(xs['0'], (-1, 768, 24, 24))
+        else:
+            xs['0'] = torch.reshape(xs['0'], (-1, 2048, 18, 12)) 
         out: Dict[str, NestedTensor] = {}
         for name, x in xs.items():
             m = tensor_list.mask
@@ -151,6 +155,7 @@ class ViTBackboneInt(nn.Module):
             mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
             out[name] = NestedTensor(x, mask)
         return out
+
 
 class Joiner(nn.Sequential):
     def __init__(self, backbone, position_embedding):
@@ -170,7 +175,7 @@ class Joiner(nn.Sequential):
 # VIT JOINER
 
 class ViTJoiner(ViTBackbone):
-    def __init  __(self, backbone, position_embedding):
+    def __init__(self, backbone, position_embedding):
         self.backbone = backbone
         self.position_embedding = position_embedding
   
@@ -192,7 +197,9 @@ class ViTJoiner(ViTBackbone):
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
     if args.backbone == 'vit':
-        backbone = ViTBackboneInt()
+        train_backbone = args.lr_backbone > 0
+        channel_768 = args.epochs == 151
+        backbone = ViTBackboneInt(train_backbone = train_backbone, channel_768 = channel_768)
         model = Joiner(backbone, position_embedding)
         model.num_channels = backbone.num_channels
         return model
