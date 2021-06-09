@@ -129,8 +129,10 @@ class ViTBackboneInt(nn.Module):
         super().__init__()
         if tiny:
             self.body = IntermediateLayerGetter(timm.create_model('vit_small_patch16_224', pretrained=True), return_layers={'blocks': '0'})
+            self.tiny = True
         else:
             self.body = IntermediateLayerGetter(timm.create_model('vit_base_patch16_384', pretrained=True), return_layers={'blocks': '0'})
+            self.tiny = False
 
         if train_backbone:
             for name, parameter in self.body.named_parameters():
@@ -149,6 +151,8 @@ class ViTBackboneInt(nn.Module):
         xs = self.body(tensor_list.tensors)
         if self.num_channels == 768:
             xs['0'] = torch.reshape(xs['0'], (-1, 768, 24, 24))
+        elif self.tiny:
+            xs['0'] = torch.reshape(xs['0'], (-1, 768, 14, 14)) 
         else:
             xs['0'] = torch.reshape(xs['0'], (-1, 2048, 18, 12)) 
         out: Dict[str, NestedTensor] = {}
