@@ -149,8 +149,10 @@ def make_coco_transforms(image_set):
 
     raise ValueError(f'unknown {image_set}')
     
+    
+    
 
-def make_voc_transforms(image_set):
+def make_voc_transforms(image_set, args):
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -158,23 +160,57 @@ def make_voc_transforms(image_set):
     ])
 
     if image_set == 'train':
-        return T.Compose([
-            T.RandomHorizontalFlip(),
-            T.RandomSelect(
-                T.RandomResize((384, 384), max_size=384),
-                T.Compose([
-                    T.RandomResize((384, 384)),
-                    T.RandomResize((384, 384), max_size=384),
+        if args.backbone == 'vit':
+            if args.epochs == 152:
+                return T.Compose([
+                    T.RandomHorizontalFlip(),
+                    T.RandomResize([(224,224)], max_size=224),
+                    T.ToTensor(),
+                    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
                 ])
-            ),
+            else:
+                return T.Compose([
+                    T.RandomHorizontalFlip(),
+                    T.RandomResize([(384,384)], max_size=384),
+                    T.ToTensor(),
+                    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+                ])
+        else:
+            return T.Compose([
+                T.RandomHorizontalFlip(),
+                T.RandomSelect(
+                    T.RandomResize([400, 500, 600], max_size=1000),
+                    T.Compose([
+                        T.RandomResize([400, 500, 600]),
+                        T.RandomCrop((384, 384)),
+                        T.RandomResize([400, 500, 600], max_size=1000),
+                    ])
+                ),
+                normalize,
+            ])
+
+    if image_set == 'val':
+        if args.backbone == 'vit':
+            if args.epochs == 152:
+                return T.Compose([
+                    T.RandomHorizontalFlip(),
+                    T.RandomResize([(224, 224)], max_size=224),
+                    T.ToTensor(),
+                    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+                ])
+            else:
+                return T.Compose([
+                    T.RandomHorizontalFlip(),
+                    T.RandomResize([(384, 384)], max_size=384),
+                    T.ToTensor(),
+                    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+                ])
+    else:
+        return T.Compose([
+            T.RandomResize([600], max_size=1000),
             normalize,
         ])
 
-    if image_set == 'val':
-        return T.Compose([
-            T.RandomResize((384, 384), max_size=384),
-            normalize,
-        ])
 
 
 def build(image_set, args):
