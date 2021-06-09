@@ -127,7 +127,10 @@ class ViTBackbone():
 class ViTBackboneInt(nn.Module):
     def __init__(self, train_backbone: bool, channel_768: bool):
         super().__init__()
-        self.body = IntermediateLayerGetter(timm.create_model('vit_base_patch16_384', pretrained=True), return_layers={'blocks': '0'})
+        if tiny:
+            self.body = IntermediateLayerGetter(timm.create_model('vit_small_patch16_224', pretrained=True), return_layers={'blocks': '0'})
+        else:
+            self.body = IntermediateLayerGetter(timm.create_model('vit_base_patch16_384', pretrained=True), return_layers={'blocks': '0'})
 
         if train_backbone:
             for name, parameter in self.body.named_parameters():
@@ -197,6 +200,7 @@ class ViTJoiner(ViTBackbone):
 def build_backbone(args):
     position_embedding = build_position_encoding(args)
     if args.backbone == 'vit':
+        tiny = args.epochs == 152
         train_backbone = args.lr_backbone > 0
         channel_768 = args.epochs == 151
         backbone = ViTBackboneInt(train_backbone = train_backbone, channel_768 = channel_768)
